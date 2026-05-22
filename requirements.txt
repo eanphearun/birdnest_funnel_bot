@@ -2,3 +2,6 @@ flask
 pyTelegramBotAPI
 gunicorn
 requests
+gspread
+oauth2client
+PyOpenSSL

@@ -1,3 +1,7 @@
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
+import json
 import os
 import requests
 from flask import Flask, request
@@ -33,6 +37,31 @@ def answer_callback(callback_id, text=None):
     if text:
         payload["text"] = text
     requests.post(url, json=payload, timeout=10)
+
+def append_lead_to_sheet(first_name, product, purpose, budget, location, lead_score, hot, chat_id):
+    try:
+        creds_json = os.environ.get("GSPREAD_CREDENTIALS_JSON")
+        if not creds_json:
+            print("No GSPREAD_CREDENTIALS_JSON set")
+            return
+        creds_dict = json.loads(creds_json)
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open("Bird Nest Leads").sheet1
+        sheet.append_row([
+            first_name,
+            product,
+            purpose,
+            budget,
+            location,
+            lead_score,
+            "HOT" if hot else "Cold",
+            str(chat_id),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ])
+    except Exception as e:
+        print(f"Sheet error: {e}")
 
 # ---------- Keyboards for each step ----------
 def product_keyboard():
@@ -140,6 +169,17 @@ def handle_callback(callback):
             f"User ID: `{chat_id}`"
         )
         send_message(OWNER_ID, summary, parse_mode="Markdown")
+
+        append_lead_to_sheet(
+            first_name,
+            state['answers'].get('product'),
+            state['answers'].get('purpose'),
+            state['answers'].get('budget'),
+            state['answers'].get('location'),
+            lead_score,
+            hot,
+            chat_id
+        )
 
         # Final message to user
         if hot:
