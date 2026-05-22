@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import os
 import requests
+import pytz
 from flask import Flask, request
 
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -58,10 +59,15 @@ def append_lead_to_sheet(first_name, product, purpose, budget, location, lead_sc
             lead_score,
             "HOT" if hot else "Cold",
             str(chat_id),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            datetime.now(pytz.timezone('Asia/Phnom_Penh')).strftime("%Y-%m-%d %H:%M:%S")
         ])
     except Exception as e:
-        print(f"Sheet error: {e}")
+        import traceback
+        print("Sheet error traceback:")
+        traceback.print_exc()
+        if hasattr(e, 'response'):
+            print("Response status:", e.response.status_code)
+            print("Response body:", e.response.text)
 
 # ---------- Keyboards for each step ----------
 def product_keyboard():
