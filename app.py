@@ -1,21 +1,22 @@
+import os
+import time
+import json
+import requests
+from flask import Flask, request
+from datetime import datetime
+import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
-import json
-import os
-import requests
-import pytz
-from flask import Flask, request
 
 TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-BIRD_BOT_LINK = "https://t.me/bird_nest_house_bot"   # your mini‑app
+BIRD_BOT_LINK = "https://t.me/bird_nest_house_bot"
+GSPREAD_CREDENTIALS_JSON = os.environ.get("GSPREAD_CREDENTIALS_JSON", "")
+SHEET_NAME = os.environ.get("SHEET_NAME", "Bird Nest Leads")
 
 app = Flask(__name__)
 
-# ---------- Lead scoring & qualification ----------
-user_state = {}    # {chat_id: {"step": "ask_product", "score": 0, "answers": {}}}
-
+user_state = {}
 SCORE_MAP = {
     "product": {"drink": 5, "dry_nest": 10, "gift": 8},
     "purpose": {"personal": 5, "resale": 20, "gift_purpose": 10},
@@ -23,6 +24,7 @@ SCORE_MAP = {
     "location": {"pp": 10, "provinces": 5, "other": 5}
 }
 
+# ---------- Helpers ----------
 def send_message(chat_id, text, reply_markup=None, parse_mode="Markdown"):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
@@ -30,7 +32,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode="Markdown"):
         payload["reply_markup"] = reply_markup
     if parse_mode:
         payload["parse_mode"] = parse_mode
-    requests.post(url, json=payload, timeout=10)
+    return requests.post(url, json=payload, timeout=10).json()
 
 def answer_callback(callback_id, text=None):
     url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
@@ -39,37 +41,41 @@ def answer_callback(callback_id, text=None):
         payload["text"] = text
     requests.post(url, json=payload, timeout=10)
 
+def get_sheet():
+    if not GSPREAD_CREDENTIALS_JSON:
+        return None
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = json.loads(GSPREAD_CREDENTIALS_JSON)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client.open(SHEET_NAME).sheet1
+
 def append_lead_to_sheet(first_name, product, purpose, budget, location, lead_score, hot, chat_id):
     try:
-        creds_json = os.environ.get("GSPREAD_CREDENTIALS_JSON")
-        if not creds_json:
-            print("No GSPREAD_CREDENTIALS_JSON set")
+        sheet = get_sheet()
+        if not sheet:
+            print("Sheet not available")
             return
-        creds_dict = json.loads(creds_json)
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        sheet = client.open("Bird Nest Leads").sheet1
         sheet.append_row([
-            first_name,
-            product,
-            purpose,
-            budget,
-            location,
-            lead_score,
-            "HOT" if hot else "Cold",
-            str(chat_id),
+            first_name, product, purpose, budget, location,
+            lead_score, "HOT" if hot else "Cold", str(chat_id),
             datetime.now(pytz.timezone('Asia/Phnom_Penh')).strftime("%Y-%m-%d %H:%M:%S")
         ])
     except Exception as e:
-        import traceback
-        print("Sheet error traceback:")
-        traceback.print_exc()
-        if hasattr(e, 'response'):
-            print("Response status:", e.response.status_code)
-            print("Response body:", e.response.text)
+        print(f"Sheet error: {e}")
 
-# ---------- Keyboards for each step ----------
+def get_all_chat_ids():
+    sheet = get_sheet()
+    if not sheet:
+        return []
+    records = sheet.get_all_values()
+    ids = set()
+    for row in records[1:]:
+        if len(row) > 7 and row[7].isdigit():
+            ids.add(int(row[7]))
+    return list(ids)
+
+# ---------- Keyboards ----------
 def product_keyboard():
     return {"inline_keyboard": [
         [{"text": "🥤 ទឹកត្រចៀកកាំ (Drink)", "callback_data": "product_drink"}],
@@ -98,7 +104,7 @@ def location_keyboard():
         [{"text": "ផ្សេងៗ", "callback_data": "location_other"}]
     ]}
 
-# ---------- Start the funnel ----------
+# ---------- Funnel start ----------
 def start_funnel(chat_id, first_name):
     user_state[chat_id] = {"step": "ask_product", "score": 0, "answers": {}}
     send_message(
@@ -108,7 +114,7 @@ def start_funnel(chat_id, first_name):
         reply_markup=product_keyboard()
     )
 
-# ---------- Process callback queries (all button presses) ----------
+# ---------- Callback handling ----------
 def handle_callback(callback):
     data = callback["data"]
     cb_id = callback["id"]
@@ -118,7 +124,6 @@ def handle_callback(callback):
     first_name = user_info.get("first_name", "អ្នក")
 
     if chat_id not in user_state:
-        # Not in funnel – start it
         start_funnel(chat_id, first_name)
         answer_callback(cb_id)
         return
@@ -126,7 +131,7 @@ def handle_callback(callback):
     state = user_state[chat_id]
     step = state["step"]
 
-    # --- Product step ---
+    # --- Product ---
     if step == "ask_product" and data.startswith("product_"):
         product = data.split("_")[1]
         state["answers"]["product"] = product
@@ -136,7 +141,7 @@ def handle_callback(callback):
         answer_callback(cb_id)
         return
 
-    # --- Purpose step ---
+    # --- Purpose ---
     if step == "ask_purpose" and data.startswith("purpose_"):
         purpose = data.split("_")[1] if data != "purpose_gift_purpose" else "gift_purpose"
         state["answers"]["purpose"] = purpose
@@ -146,7 +151,7 @@ def handle_callback(callback):
         answer_callback(cb_id)
         return
 
-    # --- Budget step ---
+    # --- Budget ---
     if step == "ask_budget" and data.startswith("budget_"):
         budget = data.split("_")[1]
         state["answers"]["budget"] = budget
@@ -156,14 +161,15 @@ def handle_callback(callback):
         answer_callback(cb_id)
         return
 
-    # --- Location step (final) ---
+    # --- Location (final) ---
     if step == "ask_location" and data.startswith("location_"):
         location = data.split("_")[1]
         state["answers"]["location"] = location
         state["score"] += SCORE_MAP["location"].get(location, 0)
-        # Qualification complete – send summary to owner
+
         lead_score = state["score"]
         hot = lead_score >= 40
+
         summary = (
             f"📊 *អតិថិជនថ្មី (Lead)*\n"
             f"ឈ្មោះ: {first_name}\n"
@@ -187,7 +193,6 @@ def handle_callback(callback):
             chat_id
         )
 
-        # Final message to user
         if hot:
             final_text = (
                 "🔥 អរគុណ! អ្នកជាអតិថិជនដែលមានសក្តានុពលខ្ពស់។\n"
@@ -209,25 +214,77 @@ def handle_callback(callback):
         answer_callback(cb_id)
         return
 
-    # Fallback
     answer_callback(cb_id)
+
+# ---------- Owner broadcast commands (added to funnel bot) ----------
+def handle_owner_command(chat_id, text):
+    if chat_id != OWNER_ID:
+        return False
+
+    parts = text.split(" ", 1)
+    cmd = parts[0].lower()
+
+    if cmd == "/broadcast" and len(parts) > 1:
+        message_text = parts[1]
+        user_ids = get_all_chat_ids()
+        if not user_ids:
+            send_message(chat_id, "No leads found in the sheet.")
+            return True
+
+        send_message(chat_id, f"Starting broadcast to {len(user_ids)} users...")
+        success, failed = 0, 0
+        for uid in user_ids:
+            try:
+                res = send_message(uid, message_text)
+                if res.get("ok"):
+                    success += 1
+                else:
+                    failed += 1
+            except:
+                failed += 1
+            time.sleep(0.05)
+        send_message(chat_id, f"Broadcast finished: {success} sent, {failed} failed.")
+        return True
+
+    if cmd == "/list":
+        user_ids = get_all_chat_ids()
+        send_message(chat_id, f"Total leads: {len(user_ids)}")
+        return True
+
+    if cmd == "/help" or cmd == "/start":
+        send_message(chat_id,
+            "Commands:\n"
+            "/broadcast <message> – send promo to all leads\n"
+            "/list – show lead count\n"
+            "/help – this message"
+        )
+        return True
+
+    return False
 
 # ---------- Webhook ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
+
+    # 1) Callback queries (inline buttons)
     if "callback_query" in data:
         handle_callback(data["callback_query"])
         return 'ok', 200
 
+    # 2) Normal message
     msg = data.get("message", {})
     if msg:
         chat_id = msg.get("chat", {}).get("id")
         text = msg.get("text", "").strip()
+
+        # Check for owner commands first
+        if handle_owner_command(chat_id, text):
+            return 'ok', 200
+
+        # Otherwise, start funnel
         user = msg.get("from", {})
         first_name = user.get("first_name", "អ្នក")
-
-        # If user sends any text message, start the funnel
         start_funnel(chat_id, first_name)
         return 'ok', 200
 
